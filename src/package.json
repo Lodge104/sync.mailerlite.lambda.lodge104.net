@@ -1,0 +1,8 @@
+{
+  "name": "mailerlite-sync-function",
+  "version": "1.0.0",
+  "private": true,
+  "description": "lodge104-mailerlite-sync Lambda handler. Deliberately has no production dependencies: @aws-sdk/client-ssm is provided by the Lambda Node.js runtime. type: module is required because the handler is written as native ESM.",
+  "type": "module",
+  "main": "index.mjs"
+}
