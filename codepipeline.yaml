@@ -445,17 +445,37 @@ Resources:
                   - codepipeline:TagResource
                   - codepipeline:UntagResource
                 Resource: !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-*"
+              # CodeBuild::Project's CloudFormation-generated physical name is
+              # "<LogicalId-truncated>-<suffix>" with NO stack-name prefix
+              # (unlike IAM::Role or CodePipeline::Pipeline), so a
+              # "${AWS::StackName}-*" wildcard never matches it -- confirmed
+              # against the real resources (e.g. "CodeBuildProjectBuildAndPac-
+              # etjmu4hZ6Qub"). Resource is "*", action list stays scoped to
+              # project lifecycle management only.
               - Effect: Allow
                 Action:
                   - codebuild:CreateProject
                   - codebuild:DeleteProject
                   - codebuild:BatchGetProjects
                   - codebuild:UpdateProject
-                Resource: !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-*"
+                Resource: "*"
               # Self-mutation (UpdateStack) must be able to manage the IAM
               # roles this same template declares, not just PassRole them --
-              # including this role itself, since an update could touch its
-              # own trust policy or inline policy document.
+              # including this role itself (its own trust policy and inline
+              # policy document), since CloudFormation needs iam:GetRole just
+              # to resolve any !GetAtt <role>.Arn reference, not only to
+              # change a role.
+              #
+              # Resource is "*" rather than name-pattern-scoped: CloudFormation
+              # auto-generates physical IAM role names by truncating the
+              # logical ID to fit the 64-character limit (e.g. this role's own
+              # physical name is "...-PipelineStackCloudFormati-<suffix>", not
+              # "...-PipelineStackCloudFormationExecutionRole-<suffix>"), so a
+              # "${AWS::StackName}-<LogicalId>-*" wildcard reliably does NOT
+              # match the real resource and silently denies access instead.
+              # The action list stays tightly scoped to role lifecycle
+              # management (no user/group/policy/account actions) to bound
+              # the blast radius despite the unscoped resource.
               - Effect: Allow
                 Action:
                   - iam:CreateRole
@@ -470,10 +490,7 @@ Resources:
                   - iam:TagRole
                   - iam:UntagRole
                   - iam:PassRole
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-CodePipelineExecutionRole-*"
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-CodeBuildServiceRole-*"
-                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-PipelineStackCloudFormationExecutionRole-*"
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - codestar-connections:CreateConnection
