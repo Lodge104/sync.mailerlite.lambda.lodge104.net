@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lodge104-mailerlite-sync
+  Consumes DynamoDB member-data change events from SQS and syncs the
+  corresponding member (and parent/guardian) records into MailerLite.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  BearerTokenParameterName:
+    Type: String
+    Description: >
+      Name of the SSM SecureString parameter holding the MailerLite API
+      bearer token (without the "Bearer " prefix). The credential itself
+      never passes through CloudFormation or a Lambda environment variable
+      in plaintext; SyncFunction reads it directly from Parameter Store at
+      startup using its own execution role.
+    Default: /lodge104/mailerlite-sync/bearer-token
+
+  ActiveMemberGroupId:
+    Type: String
+    Description: MailerLite group ID for members whose dues are current.
+    Default: "105106937266308673"
+
+  InactiveMemberGroupId:
+    Type: String
+    Description: MailerLite group ID for members whose dues have lapsed.
+    Default: "128870101421131762"
+
+  ParentGroupId:
+    Type: String
+    Description: MailerLite group ID for parent/guardian contacts of youth members.
+    Default: "128870739743868209"
+
+  QueueName:
+    Type: String
+    Description: >
+      SQS queue that receives filtered DynamoDB stream events (via an
+      EventBridge Pipe, managed outside this stack) from the
+      lodge104-member_data table and feeds SyncFunction.
+    Default: lodge104-member_data-mailerlite
+
+  DeadLetterQueueArn:
+    Type: String
+    Description: ARN of the existing SQS dead-letter queue configured for MemberDataQueue.
+
+  DeadLetterMaxReceiveCount:
+    Type: Number
+    MinValue: 1
+    Description: Existing source-queue redrive maxReceiveCount.
+
+  EnableQueueTrigger:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Set to false only for the initial resource import, then update to true.
+
+  AlarmTopicArn:
+    Type: String
+    Description: >
+      ARN of the SNS topic that receives operational alerts for this
+      function. Defaults to the existing "lodge104-lambda" topic, which is
+      shared with other Lodge 104 Lambda functions and already has email,
+      SMS, and Slack subscribers. Because it is shared, it is referenced
+      here by ARN rather than owned/created by this stack.
+    Default: "arn:aws:sns:us-east-1:423971488961:lodge104-lambda"
+
+  ErrorAlarmThreshold:
+    Type: Number
+    Description: >
+      Number of Lambda invocation errors within the evaluation window
+      (ErrorAlarmPeriodSeconds x ErrorAlarmEvaluationPeriods) that triggers
+      the error alarm.
+    Default: 2
+
+  ErrorAlarmPeriodSeconds:
+    Type: Number
+    Description: Length, in seconds, of each evaluation period used for the alarm.
+    Default: 900
+
+  ErrorAlarmEvaluationPeriods:
+    Type: Number
+    Description: Number of consecutive periods evaluated by the alarm.
+    Default: 3
+
+  ErrorAlarmDatapointsToAlarm:
+    Type: Number
+    Description: Number of breaching datapoints, out of ErrorAlarmEvaluationPeriods, required to alarm.
+    Default: 3
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [x86_64]
+    MemorySize: 128
+    Timeout: 30
+    Environment:
+      Variables:
+        BEARER_TOKEN_PARAM_NAME: !Ref BearerTokenParameterName
+        ACTIVE_MEMBER_GROUP_ID: !Ref ActiveMemberGroupId
+        INACTIVE_MEMBER_GROUP_ID: !Ref InactiveMemberGroupId
+        PARENT_GROUP_ID: !Ref ParentGroupId
+
+Conditions:
+  CreateQueueTrigger: !Equals [!Ref EnableQueueTrigger, "true"]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # IAM execution role
+  # ---------------------------------------------------------------------------
+  SyncRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >
+          Keep the physical name/path so CloudFormation import matches the
+          existing role rather than replacing it.
+        must:
+          - Grant only the SQS consumer actions the event source mapping needs.
+          - Grant read access to exactly the MailerLite bearer-token parameter.
+    Properties:
+      RoleName: lodge104-mailerlite-sync-role-arkyxb4k
+      Path: /service-role/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Basic CloudWatch Logs access
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MemberDataQueueConsumer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Least-privilege: only the actions the SQS event source mapping
+              # (polled by the Lambda service, not by function code) needs.
+              - Sid: ConsumeMemberDataQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt MemberDataQueue.Arn
+        - PolicyName: MailerLiteBearerTokenAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Scoped to just the one SecureString parameter the function reads.
+              - Sid: ReadMailerLiteBearerToken
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BearerTokenParameterName}"
+              # SecureString parameters are encrypted with the AWS-managed SSM
+              # key; scope decryption to only-via-SSM rather than a wildcard key.
+              - Sid: DecryptViaSSM
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+
+  # ---------------------------------------------------------------------------
+  # SQS queue fed by the (externally-managed) EventBridge Pipe that streams
+  # filtered change events from the lodge104-member_data DynamoDB table.
+  # Dedicated to this function, so it is owned/imported here even though the
+  # Pipe and the source table are not. Retain on delete/replace: it carries
+  # production message flow and losing it would drop in-flight sync events.
+  # ---------------------------------------------------------------------------
+  MemberDataQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >
+          Keep the physical name so CloudFormation import matches the
+          existing queue. It is the sole input to SyncFunction.
+        must:
+          - Retain on delete/replace; messages represent pending member syncs.
+    Properties:
+      QueueName: !Ref QueueName
+      VisibilityTimeout: 180
+      DelaySeconds: 1
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 0
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !Ref DeadLetterQueueArn
+        maxReceiveCount: !Ref DeadLetterMaxReceiveCount
+
+  # ---------------------------------------------------------------------------
+  # Lambda function
+  # ---------------------------------------------------------------------------
+  SyncFunction:
+    Type: AWS::Serverless::Function
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Keep the physical name so CloudFormation import matches the existing function.
+      FunctionName: lodge104-mailerlite-sync
+      Handler: index.handler
+      CodeUri: src/
+      Role: !GetAtt SyncRole.Arn
+  MemberDataQueueEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: CreateQueueTrigger
+    Properties:
+      EventSourceArn: !GetAtt MemberDataQueue.Arn
+      FunctionName: !GetAtt SyncFunction.Arn
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      ScalingConfig:
+        MaximumConcurrency: 2
+      Enabled: true
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch alarm + SNS notification
+  # Keep the physical AlarmName so CloudFormation import matches the existing
+  # alarm (originally created outside any stack). Notifications publish to the
+  # shared "lodge104-lambda" SNS topic (see AlarmTopicArn parameter); that
+  # topic is intentionally NOT defined/owned here since other Lodge 104
+  # Lambda functions' alarms also publish to it.
+  # ---------------------------------------------------------------------------
+  SyncErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AlarmName: "AWS/Lambda Errors FunctionName=lodge104-mailerlite-sync"
+      AlarmDescription: >
+        This alarm detects high error counts. The Errors metric includes the
+        exceptions thrown by the code as well as exceptions thrown by the
+        Lambda runtime. You can check the logs related to the function to
+        diagnose the issue.
+
+        This function syncs member-data changes to MailerLite in
+        near-real-time as they are written to DynamoDB. If this alarm has
+        sounded, recently changed member records are not being reflected in
+        MailerLite.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SyncFunction
+      Statistic: Sum
+      Period: !Ref ErrorAlarmPeriodSeconds
+      EvaluationPeriods: !Ref ErrorAlarmEvaluationPeriods
+      DatapointsToAlarm: !Ref ErrorAlarmDatapointsToAlarm
+      Threshold: !Ref ErrorAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+Outputs:
+  SyncFunctionArn:
+    Description: ARN of the lodge104-mailerlite-sync Lambda function
+    Value: !GetAtt SyncFunction.Arn
+
+  SyncRoleArn:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt SyncRole.Arn
+
+  MemberDataQueueArn:
+    Description: ARN of the SQS queue that triggers SyncFunction
+    Value: !GetAtt MemberDataQueue.Arn
+
+  SyncErrorAlarmArn:
+    Description: ARN of the CloudWatch alarm monitoring SyncFunction invocation errors
+    Value: !GetAtt SyncErrorAlarm.Arn
+
+  AlarmTopicArn:
+    Description: ARN of the SNS topic that receives alarm notifications
+    Value: !Ref AlarmTopicArn

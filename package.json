@@ -1,8 +1,8 @@
 {
   "name": "lambda-mailerlite-sync",
   "version": "1.0.0",
-  "description": "Syncs membership data with MailerLite",
-  "main": "index.mjs",
+  "description": "Syncs membership data with MailerLite. Deployed with AWS SAM (template.yaml) and a CodePipeline (codepipeline.yaml).",
+  "main": "src/index.mjs",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },

@@ -1,0 +1,26 @@
+version: 0.2
+# The MailerLite bearer token is no longer resolved here: SyncFunction reads
+# it directly from SSM Parameter Store (SecureString) at runtime using its
+# own execution role, so this deploy stage never needs read access to that
+# parameter at all.
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --upgrade pip
+      - pip install --upgrade awscli aws-sam-cli
+  build:
+    commands:
+      - . ./assume-role.sh ${ENV_PIPELINE_EXECUTION_ROLE} deploy
+      - >
+        sam deploy --stack-name ${ENV_STACK_NAME}
+        --template ${ENV_TEMPLATE}
+        --parameter-overrides
+          DeadLetterQueueArn=${ENV_DEAD_LETTER_QUEUE_ARN}
+          DeadLetterMaxReceiveCount=${ENV_DEAD_LETTER_MAX_RECEIVE_COUNT}
+        --capabilities CAPABILITY_NAMED_IAM
+        --region ${ENV_REGION}
+        --s3-bucket ${ENV_BUCKET}
+        --no-fail-on-empty-changeset
+        --role-arn ${ENV_CLOUDFORMATION_EXECUTION_ROLE}

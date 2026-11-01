@@ -1,3 +1,7 @@
+# AWS SAM build/pipeline artifacts
+.aws-sam/
+packaged-*.yaml
+
 # Logs
 logs
 *.log
