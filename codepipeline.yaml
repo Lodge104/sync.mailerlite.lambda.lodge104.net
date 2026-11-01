@@ -388,6 +388,7 @@ Resources:
                   - cloudformation:CreateChangeSet
                   - cloudformation:DeleteStack
                   - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
                   - cloudformation:SetStackPolicy
                   - cloudformation:UpdateStack
                 Resource:
@@ -451,12 +452,28 @@ Resources:
                   - codebuild:BatchGetProjects
                   - codebuild:UpdateProject
                 Resource: !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-*"
+              # Self-mutation (UpdateStack) must be able to manage the IAM
+              # roles this same template declares, not just PassRole them --
+              # including this role itself, since an update could touch its
+              # own trust policy or inline policy document.
               - Effect: Allow
                 Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
                   - iam:PassRole
                 Resource:
                   - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-CodePipelineExecutionRole-*"
                   - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-CodeBuildServiceRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-PipelineStackCloudFormationExecutionRole-*"
               - Effect: Allow
                 Action:
                   - codestar-connections:CreateConnection
