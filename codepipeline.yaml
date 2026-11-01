@@ -50,13 +50,6 @@ Parameters:
   ProdCloudFormationExecutionRole:
     Type: String
     Default: "arn:aws:iam::423971488961:role/aws-sam-cli-managed-prod--CloudFormationExecutionRo-rjAzX97t5EIJ"
-  ProdDeadLetterQueueArn:
-    Type: String
-    Description: ARN of the existing production SQS dead-letter queue.
-  ProdDeadLetterMaxReceiveCount:
-    Type: Number
-    MinValue: 1
-    Description: Existing production queue redrive maxReceiveCount.
   ProdArtifactBucket:
     Type: String
     Default: "aws-sam-cli-managed-prod-pipeline--artifactsbucket-ykipdbx6uu8g"
@@ -183,8 +176,6 @@ Resources:
                     {"name": "ENV_STACK_NAME", "value": "${ProdStackName}"},
                     {"name": "ENV_PIPELINE_EXECUTION_ROLE", "value": "${ProdPipelineExecutionRole}"},
                     {"name": "ENV_CLOUDFORMATION_EXECUTION_ROLE", "value": "${ProdCloudFormationExecutionRole}"},
-                    {"name": "ENV_DEAD_LETTER_QUEUE_ARN", "value": "${ProdDeadLetterQueueArn}"},
-                    {"name": "ENV_DEAD_LETTER_MAX_RECEIVE_COUNT", "value": "${ProdDeadLetterMaxReceiveCount}"},
                     {"name": "ENV_BUCKET", "value": "${ProdArtifactBucket}"}
                   ]
               InputArtifacts:
