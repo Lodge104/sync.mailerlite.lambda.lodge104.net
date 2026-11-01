@@ -29,6 +29,7 @@ once per message (`BatchSize: 1`). The function upserts a MailerLite
 subscriber for the member and, when a current-dues-year youth member has a
 parent/guardian email on file, for the parent/guardian as well.
 
+
 ## MailerLite credentials
 
 The MailerLite API bearer token is stored as a `SecureString` parameter in
@@ -113,14 +114,11 @@ new mapping as a normal stack update. Messages already in the queue are not
 lost — they are picked up by the new mapping once it is created, within the
 queue's `MessageRetentionPeriod`.
 
-The imported queue's redrive policy is modeled in the template. Before
-deploying, retrieve its current dead-letter queue ARN and `maxReceiveCount`
-and pass those exact values as `DeadLetterQueueArn` and
-`DeadLetterMaxReceiveCount` in the import parameters and production pipeline
-configuration. Do not substitute a guessed DLQ name or receive count.
-If the existing DLQ restricts its `RedriveAllowPolicy`, verify that it
-explicitly allows this source queue; the DLQ is referenced but not owned by
-this stack.
+`MemberDataQueue` has never had a dead-letter queue configured in
+production, so there is nothing to import for redrive: this stack creates
+and owns a dedicated `MemberDataDeadLetterQueue`
+(`lodge104-member_data-mailerlite-dlq`) instead. Messages are retried
+`DeadLetterMaxReceiveCount` times (default `5`) before being moved there.
 `VisibilityTimeout` is 180 seconds (six times the function's 30-second
 timeout).
 
@@ -175,13 +173,12 @@ Resume deployment only after the import succeeds. Subsequent pipeline runs
 manage these resources like any other stack resource. The SNS topic, the
 EventBridge Pipe, and the `lodge104-member_data` DynamoDB table are never
 imported or deleted by this stack — they are only read (by ARN or directly
-by the pipe, outside CloudFormation).
+by the pipe, outside CloudFormation). `MemberDataDeadLetterQueue` is a new
+resource, not an import target, so it's created normally the first time the
+stack deploys.
 
-Include `EnableQueueTrigger=false`, `DeadLetterQueueArn=<existing-DLQ-ARN>`,
-and `DeadLetterMaxReceiveCount=<existing-value>` among the parameters passed
-to the import change set. After successful import, run a normal stack update
-with the same parameter values except `EnableQueueTrigger=true` to create the
-event source mapping:
+After the import change set above executes, run a normal stack update with
+`EnableQueueTrigger=true` to create the event source mapping:
 
 ```bash
 aws cloudformation update-stack \
@@ -189,8 +186,6 @@ aws cloudformation update-stack \
   --template-body file://packaged-prod.yaml \
   --parameters \
     ParameterKey=EnableQueueTrigger,ParameterValue=true \
-    ParameterKey=DeadLetterQueueArn,UsePreviousValue=true \
-    ParameterKey=DeadLetterMaxReceiveCount,UsePreviousValue=true \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
@@ -198,10 +193,7 @@ aws cloudformation update-stack \
 
 ```bash
 sam deploy -t codepipeline.yaml --stack-name lodge104-mailerlite-sync-pipeline \
-  --capabilities CAPABILITY_NAMED_IAM --region us-east-1 \
-  --parameter-overrides \
-    ProdDeadLetterQueueArn=<existing-DLQ-ARN> \
-    ProdDeadLetterMaxReceiveCount=<existing-value>
+  --capabilities CAPABILITY_NAMED_IAM --region us-east-1
 ```
 
 The pipeline reuses the GitHub CodeStar Connection already authorized for
@@ -212,7 +204,7 @@ the stack create and own its own connection instead; that one starts in
 `PENDING` status and needs a one-time GitHub OAuth handshake in the
 console.
 
-Set `ProdDeadLetterQueueArn` and `ProdDeadLetterMaxReceiveCount` to the
-existing queue's values when deploying the pipeline. Its self-mutation role
-cannot modify IAM roles or policies; changes to pipeline IAM permissions
-require a separately approved stack update.
+Its self-mutation role (`PipelineStackCloudFormationExecutionRole`) cannot
+modify IAM roles or policies; changes to pipeline IAM permissions require a
+separately approved stack update outside the self-mutating `UpdatePipeline`
+stage.

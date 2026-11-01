@@ -46,14 +46,14 @@ Parameters:
       lodge104-member_data table and feeds SyncFunction.
     Default: lodge104-member_data-mailerlite
 
-  DeadLetterQueueArn:
-    Type: String
-    Description: ARN of the existing SQS dead-letter queue configured for MemberDataQueue.
-
   DeadLetterMaxReceiveCount:
     Type: Number
     MinValue: 1
-    Description: Existing source-queue redrive maxReceiveCount.
+    Default: 5
+    Description: >
+      Number of times a message is retried on MemberDataQueue before being
+      moved to MemberDataDeadLetterQueue. The production queue has no
+      pre-existing DLQ to import, so this stack creates and owns one.
 
   EnableQueueTrigger:
     Type: String
@@ -173,6 +173,34 @@ Resources:
                     kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
 
   # ---------------------------------------------------------------------------
+  # Dead-letter queue for MemberDataQueue. The production queue has never had
+  # a DLQ configured, so there is nothing pre-existing to import -- this
+  # stack owns and creates it fresh. The byQueue RedriveAllowPolicy is scoped
+  # to MemberDataQueue's ARN, built from the QueueName parameter rather than
+  # !GetAtt to avoid a circular resource dependency between the two queues.
+  # ---------------------------------------------------------------------------
+  MemberDataDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >
+          Captures messages MemberDataQueue couldn't deliver after
+          DeadLetterMaxReceiveCount attempts, so failures are investigable
+          instead of retried forever or silently dropped.
+        must:
+          - Retain on delete/replace; failed messages may still need investigation.
+    Properties:
+      QueueName: !Sub "${QueueName}-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days (maximum): time to investigate failures.
+      SqsManagedSseEnabled: true
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${QueueName}"
+
+  # ---------------------------------------------------------------------------
   # SQS queue fed by the (externally-managed) EventBridge Pipe that streams
   # filtered change events from the lodge104-member_data DynamoDB table.
   # Dedicated to this function, so it is owned/imported here even though the
@@ -198,7 +226,7 @@ Resources:
       ReceiveMessageWaitTimeSeconds: 0
       SqsManagedSseEnabled: true
       RedrivePolicy:
-        deadLetterTargetArn: !Ref DeadLetterQueueArn
+        deadLetterTargetArn: !GetAtt MemberDataDeadLetterQueue.Arn
         maxReceiveCount: !Ref DeadLetterMaxReceiveCount
 
   # ---------------------------------------------------------------------------
@@ -282,6 +310,10 @@ Outputs:
   MemberDataQueueArn:
     Description: ARN of the SQS queue that triggers SyncFunction
     Value: !GetAtt MemberDataQueue.Arn
+
+  MemberDataDeadLetterQueueArn:
+    Description: ARN of the dead-letter queue for MemberDataQueue
+    Value: !GetAtt MemberDataDeadLetterQueue.Arn
 
   SyncErrorAlarmArn:
     Description: ARN of the CloudWatch alarm monitoring SyncFunction invocation errors
