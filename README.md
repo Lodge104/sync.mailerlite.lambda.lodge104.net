@@ -29,12 +29,6 @@ once per message (`BatchSize: 1`). The function upserts a MailerLite
 subscriber for the member and, when a current-dues-year youth member has a
 parent/guardian email on file, for the parent/guardian as well.
 
-> **Known issue:** the EventBridge Pipe (`lodge104-member_data-SQS`) that
-> feeds the queue is not owned by this stack — it sources from a table that
-> may have other consumers in the future — and is currently in
-> `UPDATE_FAILED` state due to an invalid `eventName` filter pattern. Fix it
-> directly (`aws pipes update-pipe` / console) independently of this
-> repository; it does not block deploying this stack.
 
 ## MailerLite credentials
 
