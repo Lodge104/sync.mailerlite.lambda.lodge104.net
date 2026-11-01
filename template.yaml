@@ -242,6 +242,10 @@ Resources:
       Handler: index.handler
       CodeUri: src/
       Role: !GetAtt SyncRole.Arn
+      # Pre-existing production setting, made explicit here so it isn't lost
+      # as undocumented drift. Caps invocations to 1 at a time, which also
+      # throttles how fast the MailerLite API is called.
+      ReservedConcurrentExecutions: 1
   MemberDataQueueEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
     Condition: CreateQueueTrigger
@@ -252,8 +256,10 @@ Resources:
       MaximumBatchingWindowInSeconds: 0
       FunctionResponseTypes:
         - ReportBatchItemFailures
-      ScalingConfig:
-        MaximumConcurrency: 2
+      # No ScalingConfig: its MaximumConcurrency has a minimum of 2, which
+      # would conflict with SyncFunction's ReservedConcurrentExecutions of 1
+      # above. That reserved-concurrency setting already caps this mapping's
+      # effective concurrency to 1, so an explicit ScalingConfig is redundant.
       Enabled: true
 
   # ---------------------------------------------------------------------------
