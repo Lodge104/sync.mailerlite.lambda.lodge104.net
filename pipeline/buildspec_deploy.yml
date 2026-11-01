@@ -16,6 +16,9 @@ phases:
       - >
         sam deploy --stack-name ${ENV_STACK_NAME}
         --template ${ENV_TEMPLATE}
+        --parameter-overrides
+          DeadLetterQueueArn=${ENV_DEAD_LETTER_QUEUE_ARN}
+          DeadLetterMaxReceiveCount=${ENV_DEAD_LETTER_MAX_RECEIVE_COUNT}
         --capabilities CAPABILITY_NAMED_IAM
         --region ${ENV_REGION}
         --s3-bucket ${ENV_BUCKET}

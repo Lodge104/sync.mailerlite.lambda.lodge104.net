@@ -60,6 +60,14 @@ The MailerLite group IDs (`ActiveMemberGroupId`, `InactiveMemberGroupId`,
 `ParentGroupId`) and the `AlarmTopicArn`/`ErrorAlarmThreshold`/etc.
 parameters are not secrets and remain plain CloudFormation parameters.
 
+## Local MCP servers
+
+The workspace AWS MCP server uses `mcp-proxy-for-aws-cli==1.7.0`, pinned to
+avoid resolving a moving package version at startup. The proxy uses the
+workspace user's AWS CLI credentials. Review and explicitly approve the
+package publisher, source, and requested AWS access before starting this
+server; pinning the version does not replace that trust review.
+
 ## Monitoring & alerts
 
 The stack defines a CloudWatch alarm, `SyncErrorAlarm`, that watches the
@@ -96,12 +104,25 @@ configuration rather than allowing a normal deployment to reconcile it with
 the template.
 
 `AWS::Lambda::EventSourceMapping` does not support CloudFormation import.
-Before the first deploy, delete the function's existing manually-created SQS
+Before the first import, delete the function's existing manually-created SQS
 event source mapping (`aws lambda delete-event-source-mapping --uuid
-<uuid>`); `sam deploy` will then create a new one declared in
-`template.yaml`. Messages already in the queue are not lost — they are
-simply picked up by the new mapping once it is created, within the
+<uuid>`). The import template must use `EnableQueueTrigger=false` so it does
+not attempt to create the mapping in the `IMPORT` change set. After the import
+succeeds, update the stack with `EnableQueueTrigger=true`; this creates the
+new mapping as a normal stack update. Messages already in the queue are not
+lost — they are picked up by the new mapping once it is created, within the
 queue's `MessageRetentionPeriod`.
+
+The imported queue's redrive policy is modeled in the template. Before
+deploying, retrieve its current dead-letter queue ARN and `maxReceiveCount`
+and pass those exact values as `DeadLetterQueueArn` and
+`DeadLetterMaxReceiveCount` in the import parameters and production pipeline
+configuration. Do not substitute a guessed DLQ name or receive count.
+If the existing DLQ restricts its `RedriveAllowPolicy`, verify that it
+explicitly allows this source queue; the DLQ is referenced but not owned by
+this stack.
+`VisibilityTimeout` is 180 seconds (six times the function's 30-second
+timeout).
 
 The CodePipeline deploys on every push to `main`. Before merging a change
 that imports these resources, pause deployment by disabling the inbound
@@ -156,11 +177,31 @@ EventBridge Pipe, and the `lodge104-member_data` DynamoDB table are never
 imported or deleted by this stack — they are only read (by ARN or directly
 by the pipe, outside CloudFormation).
 
+Include `EnableQueueTrigger=false`, `DeadLetterQueueArn=<existing-DLQ-ARN>`,
+and `DeadLetterMaxReceiveCount=<existing-value>` among the parameters passed
+to the import change set. After successful import, run a normal stack update
+with the same parameter values except `EnableQueueTrigger=true` to create the
+event source mapping:
+
+```bash
+aws cloudformation update-stack \
+  --stack-name lodge104-mailerlite-sync \
+  --template-body file://packaged-prod.yaml \
+  --parameters \
+    ParameterKey=EnableQueueTrigger,ParameterValue=true \
+    ParameterKey=DeadLetterQueueArn,UsePreviousValue=true \
+    ParameterKey=DeadLetterMaxReceiveCount,UsePreviousValue=true \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
 ## Deploying the pipeline
 
 ```bash
 sam deploy -t codepipeline.yaml --stack-name lodge104-mailerlite-sync-pipeline \
-  --capabilities CAPABILITY_NAMED_IAM --region us-east-1
+  --capabilities CAPABILITY_NAMED_IAM --region us-east-1 \
+  --parameter-overrides \
+    ProdDeadLetterQueueArn=<existing-DLQ-ARN> \
+    ProdDeadLetterMaxReceiveCount=<existing-value>
 ```
 
 The pipeline reuses the GitHub CodeStar Connection already authorized for
@@ -170,3 +211,8 @@ repository, override `CodeStarConnectionArn` with an empty string to have
 the stack create and own its own connection instead; that one starts in
 `PENDING` status and needs a one-time GitHub OAuth handshake in the
 console.
+
+Set `ProdDeadLetterQueueArn` and `ProdDeadLetterMaxReceiveCount` to the
+existing queue's values when deploying the pipeline. Its self-mutation role
+cannot modify IAM roles or policies; changes to pipeline IAM permissions
+require a separately approved stack update.

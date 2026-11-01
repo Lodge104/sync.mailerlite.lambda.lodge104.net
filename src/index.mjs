@@ -59,6 +59,11 @@ async function upsertSubscriber(email, fields, groupId) {
     redirect: "follow",
   });
   const result = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `MailerLite request failed with status ${response.status}: ${result}`
+    );
+  }
   console.log(result);
 }
 

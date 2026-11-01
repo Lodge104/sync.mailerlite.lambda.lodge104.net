@@ -50,6 +50,13 @@ Parameters:
   ProdCloudFormationExecutionRole:
     Type: String
     Default: "arn:aws:iam::423971488961:role/aws-sam-cli-managed-prod--CloudFormationExecutionRo-rjAzX97t5EIJ"
+  ProdDeadLetterQueueArn:
+    Type: String
+    Description: ARN of the existing production SQS dead-letter queue.
+  ProdDeadLetterMaxReceiveCount:
+    Type: Number
+    MinValue: 1
+    Description: Existing production queue redrive maxReceiveCount.
   ProdArtifactBucket:
     Type: String
     Default: "aws-sam-cli-managed-prod-pipeline--artifactsbucket-ykipdbx6uu8g"
@@ -176,6 +183,8 @@ Resources:
                     {"name": "ENV_STACK_NAME", "value": "${ProdStackName}"},
                     {"name": "ENV_PIPELINE_EXECUTION_ROLE", "value": "${ProdPipelineExecutionRole}"},
                     {"name": "ENV_CLOUDFORMATION_EXECUTION_ROLE", "value": "${ProdCloudFormationExecutionRole}"},
+                    {"name": "ENV_DEAD_LETTER_QUEUE_ARN", "value": "${ProdDeadLetterQueueArn}"},
+                    {"name": "ENV_DEAD_LETTER_MAX_RECEIVE_COUNT", "value": "${ProdDeadLetterMaxReceiveCount}"},
                     {"name": "ENV_BUCKET", "value": "${ProdArtifactBucket}"}
                   ]
               InputArtifacts:
@@ -235,6 +244,13 @@ Resources:
               AWS:
                 - !GetAtt CodePipelineExecutionRole.Arn
                 - !GetAtt CodeBuildServiceRole.Arn
+          - Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Effect: Allow
+            Resource: !Sub "${PipelineArtifactsBucket.Arn}/*"
+            Principal:
+              AWS: !GetAtt PipelineStackCloudFormationExecutionRole.Arn
 
   PipelineArtifactsLoggingBucket:
     Type: AWS::S3::Bucket
@@ -358,6 +374,8 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
 
   # Used for the pipeline stack to self-mutate via UpdatePipeline
+  # This role can mutate only the pipeline stack and its own pipeline resources.
+  # IAM role/trust-policy changes require a separately approved stack update.
   PipelineStackCloudFormationExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -375,13 +393,92 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - "cloudformation:*"
-                  - "s3:*"
-                  - "iam:*"
-                  - "codepipeline:*"
-                  - "codebuild:*"
-                  - "codestar-connections:*"
+                  - cloudformation:CreateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:UpdateStack
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/${AWS::StackName}-ChangeSet/*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/${AWS::StackName}-ChangeSet/*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                  - s3:GetBucketLogging
+                  - s3:GetBucketOwnershipControls
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketTagging
+                  - s3:GetBucketVersioning
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutBucketAcl
+                  - s3:PutBucketLogging
+                  - s3:PutBucketOwnershipControls
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                  - s3:DeleteBucketPolicy
+                Resource:
+                  - !GetAtt PipelineArtifactsBucket.Arn
+                  - !GetAtt PipelineArtifactsLoggingBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${PipelineArtifactsBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - codepipeline:CreatePipeline
+                  - codepipeline:DeletePipeline
+                  - codepipeline:GetPipeline
+                  - codepipeline:GetPipelineState
+                  - codepipeline:UpdatePipeline
+                  - codepipeline:TagResource
+                  - codepipeline:UntagResource
+                Resource: !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-*"
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateProject
+                  - codebuild:DeleteProject
+                  - codebuild:BatchGetProjects
+                  - codebuild:UpdateProject
+                Resource: !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-CodePipelineExecutionRole-*"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-CodeBuildServiceRole-*"
+              - Effect: Allow
+                Action:
+                  - codestar-connections:CreateConnection
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - codestar-connections:DeleteConnection
+                  - codestar-connections:GetConnection
+                  - codestar-connections:ListTagsForResource
+                  - codestar-connections:TagResource
+                  - codestar-connections:UntagResource
+                  - codestar-connections:UpdateConnectionInstallation
+                Resource: !If [CreateConnection, !Ref CodeStarConnection, !Ref CodeStarConnectionArn]
 
   #   ____          _      ____        _ _     _
   #  / ___|___   __| | ___| __ ) _   _(_| | __| |
@@ -431,12 +528,9 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Action:
-                  - sts:AssumeRole
+                - sts:AssumeRole
                 Effect: Allow
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/Role: pipeline-execution-role
+                Resource: !Ref ProdPipelineExecutionRole
 
   CodeBuildProjectBuildAndPackage:
     Type: AWS::CodeBuild::Project
