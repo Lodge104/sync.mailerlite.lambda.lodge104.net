@@ -33,10 +33,9 @@ const MAILERLITE_SUBSCRIBERS_URL = "https://connect.mailerlite.com/api/subscribe
 console.log("Loading function");
 
 /**
- * Creates/updates a single MailerLite subscriber. Resolves (never rejects)
- * so that one failed upsert doesn't short-circuit the others triggered by
- * the same DynamoDB change event; errors are logged for visibility in
- * CloudWatch and surfaced to the CloudWatch alarm via the caller.
+ * Creates/updates a single MailerLite subscriber. Rejects on any non-2xx
+ * response; the handler collects rejections so every upsert for a record is
+ * attempted, then fails the invocation so SQS redelivers the message.
  */
 async function upsertSubscriber(email, fields, groupId) {
   if (!email) return;
@@ -119,14 +118,31 @@ export const handler = async (event) => {
   const isCurrentDuesYear = image.DuesYear.N >= currentYear;
   const memberGroupId = isCurrentDuesYear ? ACTIVE_MEMBER_GROUP_ID : INACTIVE_MEMBER_GROUP_ID;
 
-  await upsertSubscriber(image.EmailPrimaryAddress.S, memberFields(image), memberGroupId);
-
-  if (image.EmailParentAddress?.S && isCurrentDuesYear) {
-    await upsertSubscriber(image.EmailParentAddress.S, parentFields(image), PARENT_GROUP_ID);
+  const upserts = [
+    [image.EmailPrimaryAddress.S, memberFields(image), memberGroupId],
+  ];
+  if (isCurrentDuesYear) {
+    for (const email of [image.EmailParentAddress?.S, image.CustomEmailParent2Address?.S]) {
+      if (email) upserts.push([email, parentFields(image), PARENT_GROUP_ID]);
+    }
   }
 
-  if (image.CustomEmailParent2Address?.S && isCurrentDuesYear) {
-    await upsertSubscriber(image.CustomEmailParent2Address.S, parentFields(image), PARENT_GROUP_ID);
+  // Attempt every upsert (sequentially, to respect MailerLite rate limits) so
+  // one failure doesn't skip the others, then throw if any failed. Throwing
+  // returns the message to the queue (after the visibility timeout) for
+  // retry, and eventually to the DLQ after DeadLetterMaxReceiveCount
+  // receives. Upserts are idempotent, so re-running succeeded ones is safe.
+  const failures = [];
+  for (const [email, fields, groupId] of upserts) {
+    try {
+      await upsertSubscriber(email, fields, groupId);
+    } catch (err) {
+      console.error(`Upsert failed for ${email} (group ${groupId}):`, err);
+      failures.push(err.message);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`${failures.length} upsert(s) failed: ${failures.join("; ")}`);
   }
 
   return { statusCode: 200 };
